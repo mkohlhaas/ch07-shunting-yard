@@ -33,6 +33,11 @@ impl ASTNode {
     }
 }
 
+// Whether the character is a supported binary operator
+fn is_binary_op(op: char) -> bool {
+    matches!(op, '+' | '-' | '*' | '/')
+}
+
 // Get operator precedence weight
 fn precedence(op: char) -> i32 {
     match op {
@@ -78,6 +83,9 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
             }
             Token::Op(op1) => {
                 // Rule 3: Operators handling priority
+                if !is_binary_op(op1) {
+                    return Err("Unsupported operator");
+                }
                 while let Some(Token::Op(op2)) = operator_stack.last() {
                     if precedence(*op2) >= precedence(op1) {
                         build_tree_step(&mut operator_stack, &mut operand_stack)?;
@@ -96,9 +104,7 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
                     build_tree_step(&mut operator_stack, &mut operand_stack)?;
                 }
                 // Pop and discard the matching left parenthesis
-                if matches!(operator_stack.pop(), Some(Token::LParen)) {
-                    // Successfully discarded '('
-                } else {
+                if !matches!(operator_stack.pop(), Some(Token::LParen)) {
                     return Err("Mismatched parentheses");
                 }
             }
@@ -114,26 +120,57 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
     }
 
     // The single remaining item is our root node
-    if operand_stack.len() == 1 {
-        Ok(operand_stack.pop().unwrap())
-    } else {
-        Err("Malformed expression: multiple root nodes generated")
+    match operand_stack.len() {
+        1 => operand_stack.pop().ok_or("Malformed expression: no result"),
+        0 => Err("Empty expression"),
+        _ => Err("Malformed expression: multiple root nodes generated"),
     }
 }
 
-fn main() {
-    // Represents: 3 + 4 * 2
-    let tokens = vec![
-        Token::Number(3.0),
-        Token::Op('+'),
-        Token::Number(4.0),
-        Token::Op('*'),
-        Token::Number(2.0),
-    ];
+// Convert an infix expression string into tokens.
+fn tokenize(expr: &str) -> Result<Vec<Token>, &'static str> {
+    let mut tokens = Vec::new();
+    let mut chars = expr.chars().peekable();
 
-    match build_ast(tokens) {
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let mut number = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    number.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token::Number(
+                number.parse().expect("digits form a valid f64"),
+            ));
+            continue;
+        }
+        chars.next();
+        match c {
+            '(' => tokens.push(Token::LParen),
+            ')' => tokens.push(Token::RParen),
+            op if is_binary_op(op) => tokens.push(Token::Op(op)),
+            _ => return Err("Unexpected character in expression"),
+        }
+    }
+    Ok(tokens)
+}
+
+fn main() {
+    let expr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "3 + 4 * 2".to_string());
+
+    match tokenize(&expr).and_then(build_ast) {
         Ok(root) => {
-            println!("Successfully built AST!");
+            println!("Expression: {}", expr);
             println!("{:#?}", root);
         }
         Err(e) => println!("Error: {}", e),
@@ -144,17 +181,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    // Test-only tokenizer that turns an infix expression string into tokens.
-    fn tokenize(expr: &str) -> Vec<Token> {
-        expr.chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| match c {
-                '(' => Token::LParen,
-                ')' => Token::RParen,
-                '+' | '-' | '*' | '/' => Token::Op(c),
-                d => Token::Number(d.to_digit(10).unwrap() as f64),
-            })
-            .collect()
+    fn parse(expr: &str) -> Result<ASTNode, &'static str> {
+        build_ast(tokenize(expr)?)
     }
 
     fn eval(node: &ASTNode) -> f64 {
@@ -186,7 +214,7 @@ mod tests {
 
     #[test]
     fn single_number_leaf() {
-        let root = build_ast(tokenize("5")).unwrap();
+        let root = parse("5").unwrap();
         assert!(matches!(root.value, Token::Number(5.0)));
         assert!(root.left.is_none());
         assert!(root.right.is_none());
@@ -194,61 +222,86 @@ mod tests {
 
     #[test]
     fn simple_addition() {
-        let root = build_ast(tokenize("3+4")).unwrap();
+        let root = parse("3+4").unwrap();
         assert_eq!(eval(&root), 7.0);
     }
 
     #[test]
     fn respects_operator_precedence() {
-        let root = build_ast(tokenize("3+4*2")).unwrap();
+        let root = parse("3+4*2").unwrap();
         assert_eq!(eval(&root), 11.0);
     }
 
     #[test]
     fn left_associativity() {
-        let root = build_ast(tokenize("8-3-2")).unwrap();
+        let root = parse("8-3-2").unwrap();
         assert_eq!(eval(&root), 3.0);
     }
 
     #[test]
     fn parentheses_override_precedence() {
-        let root = build_ast(tokenize("(3+4)*2")).unwrap();
+        let root = parse("(3+4)*2").unwrap();
         assert_eq!(eval(&root), 14.0);
     }
 
     #[test]
     fn nested_parentheses() {
-        let root = build_ast(tokenize("2*(3+(4*5))")).unwrap();
+        let root = parse("2*(3+(4*5))").unwrap();
         assert_eq!(eval(&root), 46.0);
     }
 
     #[test]
     fn division_and_multiplication() {
-        let root = build_ast(tokenize("8/4*5")).unwrap();
-        assert_eq!(eval(&root), 10.0);
+        let root = parse("20/4*5").unwrap();
+        assert_eq!(eval(&root), 25.0);
     }
 
     #[test]
     fn missing_operand_rejected() {
-        let err = build_ast(tokenize("3+")).unwrap_err();
+        let err = parse("3+").unwrap_err();
         assert!(err.contains("missing operand"));
     }
 
     #[test]
     fn unbalanced_open_paren_rejected() {
-        let err = build_ast(tokenize("(3+4")).unwrap_err();
+        let err = parse("(3+4").unwrap_err();
         assert!(err.contains("Mismatched parentheses"));
     }
 
     #[test]
     fn unbalanced_close_paren_rejected() {
-        let err = build_ast(tokenize("3+4)")).unwrap_err();
+        let err = parse("3+4)").unwrap_err();
         assert!(err.contains("Mismatched parentheses"));
     }
 
     #[test]
     fn multiple_root_nodes_rejected() {
-        let err = build_ast(tokenize("3 4")).unwrap_err();
+        let err = parse("3 4").unwrap_err();
         assert!(err.contains("multiple root nodes"));
+    }
+
+    #[test]
+    fn multi_digit_numbers() {
+        let root = parse("12+8").unwrap();
+        assert_eq!(eval(&root), 20.0);
+    }
+
+    #[test]
+    fn unexpected_character_rejected() {
+        let err = parse("3@4").unwrap_err();
+        assert!(err.contains("Unexpected character"));
+    }
+
+    #[test]
+    fn unsupported_operator_rejected() {
+        let tokens = vec![Token::Number(3.0), Token::Op('^'), Token::Number(4.0)];
+        let err = build_ast(tokens).unwrap_err();
+        assert!(err.contains("Unsupported operator"));
+    }
+
+    #[test]
+    fn empty_expression_rejected() {
+        let err = parse("").unwrap_err();
+        assert!(err.contains("Empty expression"));
     }
 }
