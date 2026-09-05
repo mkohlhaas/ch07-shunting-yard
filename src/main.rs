@@ -15,6 +15,7 @@ struct ASTNode {
     right: Option<Box<ASTNode>>,
 }
 
+// LParen and RParen will be eliminated.
 impl ASTNode {
     fn leaf(val: f64) -> Self {
         ASTNode {
@@ -163,6 +164,10 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, &'static str> {
     Ok(tokens)
 }
 
+// ===== //
+// Usage //
+// ===== //
+
 fn main() {
     let expr = std::env::args()
         .nth(1)
@@ -176,6 +181,10 @@ fn main() {
         Err(e) => println!("Error: {}", e),
     }
 }
+
+// ===== //
+// Tests //
+// ===== //
 
 #[cfg(test)]
 mod tests {
