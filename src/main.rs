@@ -139,3 +139,116 @@ fn main() {
         Err(e) => println!("Error: {}", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test-only tokenizer that turns an infix expression string into tokens.
+    fn tokenize(expr: &str) -> Vec<Token> {
+        expr.chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| match c {
+                '(' => Token::LParen,
+                ')' => Token::RParen,
+                '+' | '-' | '*' | '/' => Token::Op(c),
+                d => Token::Number(d.to_digit(10).unwrap() as f64),
+            })
+            .collect()
+    }
+
+    fn eval(node: &ASTNode) -> f64 {
+        match &node.value {
+            Token::Number(v) => *v,
+            Token::Op(op) => {
+                let left = eval(node.left.as_ref().unwrap());
+                let right = eval(node.right.as_ref().unwrap());
+                match op {
+                    '+' => left + right,
+                    '-' => left - right,
+                    '*' => left * right,
+                    '/' => left / right,
+                    _ => unreachable!("unexpected operator"),
+                }
+            }
+            _ => unreachable!("branch node value is an operator"),
+        }
+    }
+
+    #[test]
+    fn precedence_weights() {
+        assert_eq!(precedence('*'), 2);
+        assert_eq!(precedence('/'), 2);
+        assert_eq!(precedence('+'), 1);
+        assert_eq!(precedence('-'), 1);
+        assert_eq!(precedence('@'), 0);
+    }
+
+    #[test]
+    fn single_number_leaf() {
+        let root = build_ast(tokenize("5")).unwrap();
+        assert!(matches!(root.value, Token::Number(5.0)));
+        assert!(root.left.is_none());
+        assert!(root.right.is_none());
+    }
+
+    #[test]
+    fn simple_addition() {
+        let root = build_ast(tokenize("3+4")).unwrap();
+        assert_eq!(eval(&root), 7.0);
+    }
+
+    #[test]
+    fn respects_operator_precedence() {
+        let root = build_ast(tokenize("3+4*2")).unwrap();
+        assert_eq!(eval(&root), 11.0);
+    }
+
+    #[test]
+    fn left_associativity() {
+        let root = build_ast(tokenize("8-3-2")).unwrap();
+        assert_eq!(eval(&root), 3.0);
+    }
+
+    #[test]
+    fn parentheses_override_precedence() {
+        let root = build_ast(tokenize("(3+4)*2")).unwrap();
+        assert_eq!(eval(&root), 14.0);
+    }
+
+    #[test]
+    fn nested_parentheses() {
+        let root = build_ast(tokenize("2*(3+(4*5))")).unwrap();
+        assert_eq!(eval(&root), 46.0);
+    }
+
+    #[test]
+    fn division_and_multiplication() {
+        let root = build_ast(tokenize("8/4*5")).unwrap();
+        assert_eq!(eval(&root), 10.0);
+    }
+
+    #[test]
+    fn missing_operand_rejected() {
+        let err = build_ast(tokenize("3+")).unwrap_err();
+        assert!(err.contains("missing operand"));
+    }
+
+    #[test]
+    fn unbalanced_open_paren_rejected() {
+        let err = build_ast(tokenize("(3+4")).unwrap_err();
+        assert!(err.contains("Mismatched parentheses"));
+    }
+
+    #[test]
+    fn unbalanced_close_paren_rejected() {
+        let err = build_ast(tokenize("3+4)")).unwrap_err();
+        assert!(err.contains("Mismatched parentheses"));
+    }
+
+    #[test]
+    fn multiple_root_nodes_rejected() {
+        let err = build_ast(tokenize("3 4")).unwrap_err();
+        assert!(err.contains("multiple root nodes"));
+    }
+}
