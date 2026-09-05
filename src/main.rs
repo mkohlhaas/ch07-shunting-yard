@@ -48,27 +48,49 @@ fn precedence(op: char) -> i32 {
     }
 }
 
-fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
+#[derive(Debug, thiserror::Error)]
+enum TokenizeError {
+    #[error("unexpected character in expression: `{0}`")]
+    UnexpectedCharacter(char),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+    #[error(transparent)]
+    Tokenize(#[from] TokenizeError),
+    #[error("unsupported operator: `{0}`")]
+    UnsupportedOperator(char),
+    #[error("mismatched parentheses")]
+    MismatchedParentheses,
+    #[error("expected operator on stack")]
+    ExpectedOperator,
+    #[error("malformed expression: missing operand")]
+    MissingOperand,
+    #[error("empty expression")]
+    EmptyExpression,
+    #[error("malformed expression: no result")]
+    NoResult,
+    #[error("malformed expression: multiple root nodes generated")]
+    MultipleRoots,
+}
+
+fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, BuildError> {
     let mut operator_stack: Vec<Token> = Vec::new();
     let mut operand_stack: Vec<ASTNode> = Vec::new();
 
     let build_tree_step = |operator_stack: &mut Vec<Token>,
                            operand_stack: &mut Vec<ASTNode>|
-     -> Result<(), &'static str> {
+     -> Result<(), BuildError> {
         if let Some(Token::Op(op)) = operator_stack.pop() {
             // Right child is popped first due to LIFO behavior
-            let right = operand_stack
-                .pop()
-                .ok_or("Malformed expression: missing operand")?;
-            let left = operand_stack
-                .pop()
-                .ok_or("Malformed expression: missing operand")?;
+            let right = operand_stack.pop().ok_or(BuildError::MissingOperand)?;
+            let left = operand_stack.pop().ok_or(BuildError::MissingOperand)?;
 
             let parent_node = ASTNode::branch(op, left, right);
             operand_stack.push(parent_node);
             Ok(())
         } else {
-            Err("Expected operator on stack")
+            Err(BuildError::ExpectedOperator)
         }
     };
 
@@ -85,7 +107,7 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
             Token::Op(op1) => {
                 // Rule 3: Operators handling priority
                 if !is_binary_op(op1) {
-                    return Err("Unsupported operator");
+                    return Err(BuildError::UnsupportedOperator(op1));
                 }
                 while let Some(Token::Op(op2)) = operator_stack.last() {
                     if precedence(*op2) >= precedence(op1) {
@@ -106,7 +128,7 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
                 }
                 // Pop and discard the matching left parenthesis
                 if !matches!(operator_stack.pop(), Some(Token::LParen)) {
-                    return Err("Mismatched parentheses");
+                    return Err(BuildError::MismatchedParentheses);
                 }
             }
         }
@@ -115,21 +137,21 @@ fn build_ast(tokens: Vec<Token>) -> Result<ASTNode, &'static str> {
     // Rule 5: Flush out any remaining operations
     while !operator_stack.is_empty() {
         if matches!(operator_stack.last(), Some(Token::LParen)) {
-            return Err("Mismatched parentheses");
+            return Err(BuildError::MismatchedParentheses);
         }
         build_tree_step(&mut operator_stack, &mut operand_stack)?;
     }
 
     // The single remaining item is our root node
     match operand_stack.len() {
-        1 => operand_stack.pop().ok_or("Malformed expression: no result"),
-        0 => Err("Empty expression"),
-        _ => Err("Malformed expression: multiple root nodes generated"),
+        1 => operand_stack.pop().ok_or(BuildError::NoResult),
+        0 => Err(BuildError::EmptyExpression),
+        _ => Err(BuildError::MultipleRoots),
     }
 }
 
 // Convert an infix expression string into tokens.
-fn tokenize(expr: &str) -> Result<Vec<Token>, &'static str> {
+fn tokenize(expr: &str) -> Result<Vec<Token>, TokenizeError> {
     let mut tokens = Vec::new();
     let mut chars = expr.chars().peekable();
 
@@ -158,7 +180,7 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, &'static str> {
             '(' => tokens.push(Token::LParen),
             ')' => tokens.push(Token::RParen),
             op if is_binary_op(op) => tokens.push(Token::Op(op)),
-            _ => return Err("Unexpected character in expression"),
+            _ => return Err(TokenizeError::UnexpectedCharacter(c)),
         }
     }
     Ok(tokens)
@@ -173,7 +195,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "3 + 4 * 2".to_string());
 
-    match tokenize(&expr).and_then(build_ast) {
+    match tokenize(&expr).map_err(Into::into).and_then(build_ast) {
         Ok(root) => {
             println!("Expression: {}", expr);
             println!("{:#?}", root);
@@ -190,7 +212,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn parse(expr: &str) -> Result<ASTNode, &'static str> {
+    fn parse(expr: &str) -> Result<ASTNode, BuildError> {
         build_ast(tokenize(expr)?)
     }
 
@@ -266,27 +288,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_errors_implement_std_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<TokenizeError>();
+        assert_error::<BuildError>();
+    }
+
+    #[test]
     fn missing_operand_rejected() {
         let err = parse("3+").unwrap_err();
-        assert!(err.contains("missing operand"));
+        assert!(matches!(err, BuildError::MissingOperand));
     }
 
     #[test]
     fn unbalanced_open_paren_rejected() {
         let err = parse("(3+4").unwrap_err();
-        assert!(err.contains("Mismatched parentheses"));
+        assert!(matches!(err, BuildError::MismatchedParentheses));
     }
 
     #[test]
     fn unbalanced_close_paren_rejected() {
         let err = parse("3+4)").unwrap_err();
-        assert!(err.contains("Mismatched parentheses"));
+        assert!(matches!(err, BuildError::MismatchedParentheses));
     }
 
     #[test]
     fn multiple_root_nodes_rejected() {
         let err = parse("3 4").unwrap_err();
-        assert!(err.contains("multiple root nodes"));
+        assert!(matches!(err, BuildError::MultipleRoots));
     }
 
     #[test]
@@ -298,19 +327,22 @@ mod tests {
     #[test]
     fn unexpected_character_rejected() {
         let err = parse("3@4").unwrap_err();
-        assert!(err.contains("Unexpected character"));
+        assert!(matches!(
+            err,
+            BuildError::Tokenize(TokenizeError::UnexpectedCharacter('@'))
+        ));
     }
 
     #[test]
     fn unsupported_operator_rejected() {
         let tokens = vec![Token::Number(3.0), Token::Op('^'), Token::Number(4.0)];
         let err = build_ast(tokens).unwrap_err();
-        assert!(err.contains("Unsupported operator"));
+        assert!(matches!(err, BuildError::UnsupportedOperator('^')));
     }
 
     #[test]
     fn empty_expression_rejected() {
         let err = parse("").unwrap_err();
-        assert!(err.contains("Empty expression"));
+        assert!(matches!(err, BuildError::EmptyExpression));
     }
 }
